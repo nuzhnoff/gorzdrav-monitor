@@ -17,3 +17,4 @@ data/
 !*.json.example
 !package.json
 !tsconfig.json
+COMMANDS.md
