@@ -1,10 +1,19 @@
 __pycache__/
+*.pyc
+*.pyo
 .venv/
+venv/
 .env
 .vscode/
 .pytest_cache/
-*.json
 *.ipynb
 *.db
 *.sqlite
+*.log
 data/
+
+# JSON: игнорируем всё, КРОМЕ шаблонов .example
+*.json
+!*.json.example
+!package.json
+!tsconfig.json
