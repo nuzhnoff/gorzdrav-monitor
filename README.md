@@ -1,127 +1,39 @@
-# Горздрав СПб бот
+# Gorzdrav Monitor
 
-Бот для телеграм для проверки талонов к врачу через апи горздрава
+Мониторинг свободных талонов на портале [gorzdrav.spb.ru](https://gorzdrav.spb.ru) с уведомлениями на email.
 
-## Установка и запуск
+## Скрипты
 
-- склонировать или скопировать репозиторий
+- **`build_db.py`** — собирает базу врачей (SQLite) через API Горздрава. Запускается один раз.
+- **`search_db.py`** — интерактивный поиск по базе: поликлиника → специальность → врач. Записывает выбранного врача в `doctor_info.json`.
+- **`monitor.py`** — проверяет расписание выбранного врача каждые 5 минут и отправляет email, когда появляются свободные талоны.
 
-  ```sh
-  git clone <repository-url>
-  cd <repository-folder>
-  ```
+## Требования
 
-- создать `.env` файл в корне проекта
+- Python 3.10+
+- Аккаунт Яндекс.Почты (для SMTP)
 
-  ```sh
-  BOT_TOKEN="ваш телеграм токен от @BotFather"
-  DB_FILE="sqlite.db"
-  CHECKER_TIMEOUT_SECS=60
-  ```
+## Установка
 
-- создать виртуальное окружение
+1. Клонируйте репозиторий:
+   ```bash
+   git clone https://github.com/nuzhnoff/gorzdrav-monitor.git
+   cd gorzdrav-monitor
+##Создайте виртуальное окружение и установите зависимости:
+bash
 
-  ```sh
-  python -m venv venv
-  ```
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+##Скопируйте .env.example в .env и заполните:
+bash
 
-- активировать виртуальное окружение
+cp .env.example .env
+nano .env
 
-  Linux
+##Важно: YANDEX_PASSWORD — это пароль приложения, не основной пароль от почты. Создайте его в настройках Яндекс ID → «Пароли приложений» → тип «Почта».
 
-  ```sh
-  source venv/bin/activate
-  ```
-  
-  Windows
+##Добавьте сертификат Минцифры в certifi (требуется для доступа к gorzdrav.spb.ru):
+bash
 
-  ```cmd
-  venv\Scripts\activate
-  ```
-
-- установить зависимости
-
-  ```sh
-  # Установить зависимости
-  pip install -r requirements.txt
-  ```
-
-- Запуск
-
-  ```bash
-  python3 src/app.py
-  ```
-
-### Конфигурация программы
-
-Настройки для запуска программы хранятся в текстовом файле `.env`.
-
-Параметр | Описание
--- | --
-`BOT_TOKEN` | токен телеграм бота от [@BotFather](https://t.me/botfather)
-`DB_FILE` | имя файла базы данных (создается новый если файла нет)
-`CHECKER_TIMEOUT_SECS` | период проверки свободных талончиков через api горздрава
-
-## Функционал
-
-Бот проверяет периодически доступность талончиков к врачу и выводит оповещение в телеграм пользователю, если у врача есть свободные талончики.
-
-## Команды бота
-
-Команда       | Описание
--|-
-`/status`     | показать статус врача и статус отслеживания
-`/on`         | включить отслеживание свободных мест для записи
-`/off`        | отключить отслеживание свободных мест для записи
-`/help`       | помощь
-`/start`      | создать профиль пользователя бота
-`/delete`     | удалить профиль пользователя бота
-`/set_doctor` | задать врача для отслеживания
-
-## База данных
-
-- хранит пользователей бота:
-  - телеграм ид
-  - включен ли мониторинг свободных мест у врача
-  - ссылка на врача
-  - время последнего взаимодействия с ботом
-- хранит врачей пользователя:
-  - ид района
-  - ид медучреждения
-  - ид специальности
-  - ид врача
-
-## API
-
-### Gorzdrav API
-
-[https://github.com/egorantonov/gorzdrav/wiki/SPB-Gorzdrav-API-Documentation](https://github.com/egorantonov/gorzdrav/wiki/SPB-Gorzdrav-API-Documentation)
-
-#### Примеры запросов к горздраву
-
-- [https://gorzdrav.spb.ru/_api/api/v2/shared/districts](https://gorzdrav.spb.ru/_api/api/v2/shared/districts) - список районов
-- [https://gorzdrav.spb.ru/_api/api/v2/shared/district/10/lpus](https://gorzdrav.spb.ru/_api/api/v2/shared/district/10/lpus) - список медучреждений в 10 районе
-- [https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/229/specialties](https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/229/specialties) - информация по всем свободным специальностям в больнице с ид 229
-- [https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/30/speciality/981/doctors](https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/30/speciality/981/doctors) - информация по доступным врачам в больнице 30 по специальности 981
-- [https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/1138/doctor/36/timetable](https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/1138/doctor/36/timetable) - расписание врача 36 в больнице 1138
-- [https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/30/doctor/222618/appointments](https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/30/doctor/222618/appointments) - доступные назначения к врачу
-
-### Особенности
-
-При получении списка докторов на сайте горздрава, можно сразу получить информацию о количестве у них свободных мест в поле `freeParticipantCount`. Далее при выборе места для записи запрашивается информация о `appointments`. __Но__ количество `appointments` может отличаться от количества свободных номерков `freeParticipantCount` в поле доктора. Т.е. в списке докторов у него может не быть свободных номерков, но быть несколько свободных `appointments`.
-
-## Тесты
-
-Запуск тестов
-
-```sh
-cd src
-python -m pytest .
-```
-
-## Releases
-
-- `v1.2.2` - фикс модели ApiAppointment
-- `v1.2.0` - Автоматически отключаются проверку у пользователей, которых не было видно больше 2х месяцев
-- `v1.1.0` - Добавлена возможность устанавливать количество дней в пределах которого ищется талончик от текущего дня. (в БД появилась новая колонка у пользователя)
-
+curl -k "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt" -w "\n" >> $(python -m certifi)
