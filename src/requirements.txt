@@ -1,8 +1,0 @@
-requests
-pytelegrambotapi
-validators
-dnspython
-pydantic
-sqlalchemy
-pytest
-python-dotenv
