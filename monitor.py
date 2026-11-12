@@ -1,18 +1,18 @@
+"""Мониторинг талонов по списку врачей из watchlist.json."""
 import requests
 import time
 import smtplib
-import sqlite3
-import json
 import os
 from email.mime.text import MIMEText
 from email.header import Header
 from dotenv import load_dotenv
 
+import watchlist
+
 load_dotenv()
 
-DB_PATH = "doctors.db"
-DOCTOR_INFO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "doctor_info.json")
-CHECK_INTERVAL = 300
+CHECK_INTERVAL = 300       # проверка каждые 5 минут
+NOTIFY_COOLDOWN = 3600     # по одному врачу не спамить чаще раза в час
 
 SMTP_HOST = "smtp.yandex.ru"
 SMTP_PORT = 465
@@ -20,32 +20,9 @@ SMTP_USER = os.getenv("YANDEX_LOGIN")
 SMTP_PASS = os.getenv("YANDEX_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_RECEIVER")
 
-def load_doctor_info():
-    """Читает doctor_info.json. Возвращает dict или None."""
-    try:
-        with open(DOCTOR_INFO_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError as e:
-        print(f"[{time.strftime('%H:%M:%S')}] Ошибка JSON в {DOCTOR_INFO_FILE}: {e}")
-        return None
+# {(lpu_id, doctor_id): timestamp последнего уведомления}
+last_notified = {}
 
-def get_doctor_from_db(doctor_id):
-    """Ищет врача в БД. Возвращает (lpu_id, name, speciality_id, speciality_name, lpu_name) или None."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT lpu_id, name, speciality_id, speciality_name, lpu_name
-            FROM doctors WHERE id = ?
-        """, (str(doctor_id),))
-        row = cur.fetchone()
-        conn.close()
-        return row
-    except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] Ошибка БД: {e}")
-        return None
 
 def send_email(subject, body):
     if not all([SMTP_USER, SMTP_PASS, EMAIL_TO]):
@@ -63,6 +40,7 @@ def send_email(subject, body):
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] Ошибка email: {e}")
 
+
 def build_link(lpu_id, spec_id, doctor_id):
     return (
         "https://gorzdrav.spb.ru/service-free-schedule"
@@ -71,20 +49,29 @@ def build_link(lpu_id, spec_id, doctor_id):
         f"%7B%22doctor%22:%22{doctor_id}%22%7D%5D"
     )
 
-def check_doctor(info):
-    """info — dict из doctor_info.json + данные из БД."""
-    doctor_id = info["doctor_id"]
-    lpu_id = info["lpu_id"]
-    spec_id = info["speciality_id"]
-    name = info["doctor_name"]
-    spec_name = info["speciality"]
-    lpu_name = info["lpu_name"]
+
+def check_doctor(lpu_id, doctor_id, details):
+    """Проверяет одного врача. details — dict из БД (ФИО, специальность, ЛПУ)."""
+    key = (str(lpu_id), str(doctor_id))
+    name = details["doctor_name"]
+    spec = details["speciality"]
+    lpu_name = details["lpu_name"]
+    spec_id = details.get("speciality_id", "")
+
+    # Кулдаун: если недавно уже уведомляли — пропускаем
+    if key in last_notified:
+        elapsed = time.time() - last_notified[key]
+        if elapsed < NOTIFY_COOLDOWN:
+            mins = int((NOTIFY_COOLDOWN - elapsed) / 60)
+            print(f"[{time.strftime('%H:%M:%S')}] {name}: кулдаун, ещё {mins} мин")
+            return
 
     url = f"https://gorzdrav.spb.ru/_api/api/v2/schedule/lpu/{lpu_id}/doctor/{doctor_id}/timetable"
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
         data = r.json()
+
         result = data.get("result")
         if result is None:
             print(f"[{time.strftime('%H:%M:%S')}] {name}: неожиданный формат ответа")
@@ -94,22 +81,34 @@ def check_doctor(info):
         for day in result:
             appts = day.get("appointments", [])
             if appts:
+                slots_fmt = []
+                for a in appts[:5]:
+                    start = a.get("visitStart", "")
+                    end = a.get("visitEnd", "")
+                    t_start = start[11:16] if len(start) >= 16 else start
+                    t_end = end[11:16] if len(end) >= 16 else end
+                    room = a.get("room") or "—"
+                    addr = a.get("address") or ""
+                    line = f"{t_start}–{t_end}  |  каб. {room}"
+                    if addr:
+                        line += f"  |  {addr}"
+                    slots_fmt.append(line)
                 free_days.append({
                     "date": day.get("visitStart", "")[:10],
                     "count": len(appts),
-                    "slots": appts[:5],
+                    "slots": slots_fmt,
                 })
 
         if free_days:
             link = build_link(lpu_id, spec_id, doctor_id)
-            subject = f"🎉 Талоны: {name} ({spec_name})"
+            subject = f"🎉 Талоны: {name} ({spec})"
             lines = [
                 f"👨‍⚕️ Врач: {name}",
-                f"🩺 Специальность: {spec_name}",
+                f"🩺 Специальность: {spec}",
                 f"🏥 Учреждение: {lpu_name}",
             ]
-            if info.get("lpu_address"):
-                lines.append(f"📍 Адрес: {info['lpu_address']}")
+            if details.get("lpu_address"):
+                lines.append(f"📍 Адрес: {details['lpu_address']}")
             lines += [
                 "",
                 "🔗 Ссылка на запись:",
@@ -117,14 +116,15 @@ def check_doctor(info):
                 "",
             ]
             for d in free_days:
-                lines.append(f"📅 {d['date']} — {d['count']} слотов")
+                word = "слот" if d["count"] == 1 else ("слота" if d["count"] < 5 else "слотов")
+                lines.append(f"📅 {d['date']} — {d['count']} {word}")
                 for slot in d["slots"]:
                     lines.append(f"   • {slot}")
                 lines.append("")
             body = "\n".join(lines)
-            print(f"[{time.strftime('%H:%M:%S')}] {name}: ТАЛОНЫ ЕСТЬ! Отправка...")
+            print(f"[{time.strftime('%H:%M:%S')}] {name}: ТАЛОНЫ ЕСТЬ! Отправка email...")
             send_email(subject, body)
-            time.sleep(3600)
+            last_notified[key] = time.time()
         else:
             print(f"[{time.strftime('%H:%M:%S')}] {name}: талонов нет (дней: {len(result)})")
 
@@ -133,58 +133,32 @@ def check_doctor(info):
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] {name}: ошибка — {e}")
 
-def resolve_info(file_info):
-    """
-    Объединяет данные из doctor_info.json с данными из БД.
-    Приоритет у БД (там точные ФИО/специальность). Fallback — файл.
-    """
-    doctor_id = file_info.get("doctor_id")
-    if not doctor_id:
-        return None
-    row = get_doctor_from_db(doctor_id)
-    if row:
-        lpu_id, name, spec_id, spec_name, lpu_name = row
-        return {
-            "doctor_id": str(doctor_id),
-            "lpu_id": str(lpu_id),
-            "speciality_id": str(spec_id),
-            "doctor_name": name,
-            "speciality": spec_name,
-            "lpu_name": lpu_name,
-            "lpu_address": file_info.get("lpu_address", ""),
-        }
-    # fallback на файл
-    if all(k in file_info for k in ("lpu_id", "speciality_id", "doctor_name", "speciality", "lpu_name")):
-        return file_info
-    print(f"[{time.strftime('%H:%M:%S')}] Врач {doctor_id} не найден в БД и в файле недостаточно данных")
-    return None
 
 def main():
-    print("Монитор запущен (автоматический режим).")
-    print(f"Файл настроек: {DOCTOR_INFO_FILE}")
-    print(f"Интервал: {CHECK_INTERVAL} сек.\n")
+    print("Монитор запущен (watchlist режим).")
+    print(f"Интервал: {CHECK_INTERVAL} сек, кулдаун уведомлений: {NOTIFY_COOLDOWN} сек")
+    print(f"Email: {EMAIL_TO}\n")
 
-    last_doctor_id = None
     while True:
-        file_info = load_doctor_info()
-        if not file_info:
-            print(f"[{time.strftime('%H:%M:%S')}] doctor_info.json не найден или пуст. Ждём...")
+        entries = watchlist.list_watchlist()
+        if not entries:
+            print(f"[{time.strftime('%H:%M:%S')}] Watchlist пуст. Ждём...")
             time.sleep(CHECK_INTERVAL)
             continue
 
-        info = resolve_info(file_info)
-        if not info:
-            time.sleep(CHECK_INTERVAL)
-            continue
+        print(f"\n[{time.strftime('%H:%M:%S')}] Проверка {len(entries)} врач(ей)...")
+        for entry in entries:
+            lpu_id = str(entry.get("lpu_id", ""))
+            doctor_id = str(entry.get("doctor_id", ""))
+            details = watchlist.get_doctor_details(doctor_id, lpu_id)
+            if not details:
+                print(f"[{time.strftime('%H:%M:%S')}] {lpu_id}/{doctor_id}: не найден в БД")
+                continue
+            check_doctor(lpu_id, doctor_id, details)
+            time.sleep(0.5)  # пауза между врачами, чтобы не долбить API
 
-        # Если врач сменился — сообщим в лог
-        if info["doctor_id"] != last_doctor_id:
-            print(f"[{time.strftime('%H:%M:%S')}] Активный врач: {info['doctor_name']} "
-                  f"({info['speciality']}, {info['lpu_name']})")
-            last_doctor_id = info["doctor_id"]
-
-        check_doctor(info)
         time.sleep(CHECK_INTERVAL)
+
 
 if __name__ == "__main__":
     try:
